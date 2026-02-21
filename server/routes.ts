@@ -1,32 +1,114 @@
 import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "node:http";
 import OpenAI from "openai";
-import { toFile } from "openai";
+import { GoogleGenAI } from "@google/genai";
 import { db } from "./db";
 import { contentItems, contentImages, qaMessages } from "@shared/schema";
 import { eq, desc } from "drizzle-orm";
 import {
   getVideoMetadata,
-  downloadAndExtractFrames,
+  downloadVideo,
+  prepareVideoForGemini,
   getInstagramCaption,
+  cleanupWorkDir,
 } from "./utils/video";
+import { batchProcess } from "./replit_integrations/batch";
 
 const openai = new OpenAI({
   apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
   baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
 });
 
-async function transcribeAudio(audioBuffer: Buffer): Promise<string> {
+const gemini = new GoogleGenAI({
+  apiKey: process.env.AI_INTEGRATIONS_GEMINI_API_KEY,
+  httpOptions: {
+    apiVersion: "",
+    baseUrl: process.env.AI_INTEGRATIONS_GEMINI_BASE_URL,
+  },
+});
+
+async function analyzeVideoWithGemini(
+  videoChunks: { data: string; mimeType: string }[],
+  caption: string,
+): Promise<{ title: string; summary: string; keyTopics: string[]; insights: string; transcript: string }> {
+  const chunkResults = await batchProcess(
+    videoChunks,
+    async (chunk, index) => {
+      const parts: any[] = [
+        { inlineData: { mimeType: chunk.mimeType, data: chunk.data } },
+        {
+          text: `Analyze this video segment (part ${index + 1} of ${videoChunks.length}).
+${caption ? `Original caption: ${caption}` : ""}
+
+Provide a JSON response with:
+- "transcript": Full transcription of all spoken words/dialogue in this segment
+- "visualDescription": Detailed description of what's shown visually
+- "keyPoints": Array of key points or topics covered
+- "mood": The overall mood/tone`,
+        },
+      ];
+
+      const response = await gemini.models.generateContent({
+        model: "gemini-2.5-flash",
+        contents: [{ role: "user", parts }],
+        config: { maxOutputTokens: 8192 },
+      });
+
+      const text = response.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
+      const jsonMatch = text.match(/```json\s*([\s\S]*?)```/) || text.match(/\{[\s\S]*\}/);
+      try {
+        return JSON.parse(jsonMatch ? (jsonMatch[1] || jsonMatch[0]) : text);
+      } catch {
+        return { transcript: "", visualDescription: text, keyPoints: [], mood: "" };
+      }
+    },
+    { concurrency: 1, retries: 5 },
+  );
+
+  const combinedTranscript = chunkResults.map((r: any) => r.transcript || "").filter(Boolean).join(" ");
+  const combinedVisuals = chunkResults.map((r: any) => r.visualDescription || "").filter(Boolean).join("\n\n");
+  const allKeyPoints = chunkResults.flatMap((r: any) => r.keyPoints || []);
+
+  const synthesisResponse = await openai.chat.completions.create({
+    model: "gpt-5.2",
+    max_completion_tokens: 8192,
+    messages: [
+      {
+        role: "system",
+        content: `You synthesize multi-segment video analysis into a cohesive final analysis. Return JSON with:
+- "title": A concise descriptive title
+- "summary": A comprehensive 2-4 paragraph summary
+- "keyTopics": Array of 3-8 key topics or themes
+- "insights": Detailed insights, takeaways, or notable points`,
+      },
+      {
+        role: "user",
+        content: `Synthesize this video analysis:
+
+Visual Content: ${combinedVisuals}
+
+Transcript: ${combinedTranscript || "No spoken words detected"}
+
+Key Points: ${JSON.stringify(allKeyPoints)}
+
+${caption ? `Original Caption: ${caption}` : ""}`,
+      },
+    ],
+    response_format: { type: "json_object" },
+  });
+
+  const raw = synthesisResponse.choices[0]?.message?.content || "{}";
   try {
-    const file = await toFile(audioBuffer, "audio.wav");
-    const response = await openai.audio.transcriptions.create({
-      file,
-      model: "gpt-4o-mini-transcribe",
-    });
-    return response.text;
-  } catch (e) {
-    console.error("Transcription failed:", e);
-    return "";
+    const parsed = JSON.parse(raw);
+    return {
+      title: parsed.title || "Untitled",
+      summary: parsed.summary || "",
+      keyTopics: parsed.keyTopics || [],
+      insights: parsed.insights || "",
+      transcript: combinedTranscript,
+    };
+  } catch {
+    return { title: "Untitled", summary: raw, keyTopics: [], insights: "", transcript: combinedTranscript };
   }
 }
 
@@ -35,7 +117,7 @@ async function analyzeWithVision(
   transcript: string,
   caption: string,
 ): Promise<{ title: string; summary: string; keyTopics: string[]; insights: string }> {
-  const imageMessages: any[] = frames.map((frame) => ({
+  const imageMessages: any[] = frames.slice(0, 10).map((frame) => ({
     type: "image_url",
     image_url: { url: `data:image/jpeg;base64,${frame}`, detail: "low" },
   }));
@@ -46,7 +128,7 @@ async function analyzeWithVision(
 
   const response = await openai.chat.completions.create({
     model: "gpt-5.2",
-    max_completion_tokens: 4096,
+    max_completion_tokens: 8192,
     messages: [
       {
         role: "system",
@@ -102,7 +184,7 @@ async function analyzeTextContent(
 
   const response = await openai.chat.completions.create({
     model: "gpt-5.2",
-    max_completion_tokens: 4096,
+    max_completion_tokens: 8192,
     messages: [
       {
         role: "system",
@@ -160,32 +242,33 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
     try {
       if (mode === "multimodal") {
-        const { frames, audioBuffer, metadata } = await downloadAndExtractFrames(url);
+        const { videoPath, workDir, metadata } = await downloadVideo(url);
 
-        let transcript = "";
-        if (audioBuffer && audioBuffer.length > 1000) {
-          transcript = await transcribeAudio(audioBuffer);
+        try {
+          const { chunks, thumbnailBase64 } = await prepareVideoForGemini(videoPath);
+
+          if (chunks.length === 0) {
+            throw new Error("Failed to prepare video for analysis - file may be too large or corrupted");
+          }
+
+          const analysis = await analyzeVideoWithGemini(chunks, metadata.description || "");
+
+          await db
+            .update(contentItems)
+            .set({
+              title: analysis.title,
+              summary: analysis.summary,
+              transcript: analysis.transcript || metadata.subtitles || null,
+              keyTopics: JSON.stringify(analysis.keyTopics),
+              insights: analysis.insights,
+              rawCaption: metadata.description || null,
+              thumbnailData: thumbnailBase64 || null,
+              status: "complete",
+            })
+            .where(eq(contentItems.id, item.id));
+        } finally {
+          await cleanupWorkDir(workDir);
         }
-
-        const analysis = await analyzeWithVision(
-          frames,
-          transcript,
-          metadata.description || "",
-        );
-
-        await db
-          .update(contentItems)
-          .set({
-            title: analysis.title,
-            summary: analysis.summary,
-            transcript: transcript || metadata.subtitles || null,
-            keyTopics: JSON.stringify(analysis.keyTopics),
-            insights: analysis.insights,
-            rawCaption: metadata.description || null,
-            thumbnailData: frames[0] || null,
-            status: "complete",
-          })
-          .where(eq(contentItems.id, item.id));
       } else {
         const metadata = await getVideoMetadata(url);
         const analysis = await analyzeTextContent(metadata);
@@ -393,7 +476,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         model: "gpt-5.2",
         messages: chatHistory,
         stream: true,
-        max_completion_tokens: 4096,
+        max_completion_tokens: 8192,
       });
 
       let fullResponse = "";

@@ -1,5 +1,5 @@
 entrypoint = "README.md"
-modules = ["nodejs-22"]
+modules = ["nodejs-22", "postgresql-16"]
 
 [nix]
 channel = "stable-24_05"
@@ -23,7 +23,7 @@ PORT = "5000"
 
 [agent]
 stack = "EXPO"
-integrations = ["javascript_openai_ai_integrations:2.0.0"]
+integrations = ["javascript_openai_ai_integrations:2.0.0", "javascript_gemini_ai_integrations:2.0.0"]
 
 [workflows]
 runButton = "Project"
