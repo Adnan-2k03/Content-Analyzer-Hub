@@ -20,6 +20,7 @@ try {
     apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
     baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
   });
+  if (openai) console.log("OpenAI client initialized");
 } catch (err) {
   console.warn("OpenAI client initialization failed:", err?.message || err);
 }
@@ -33,6 +34,7 @@ try {
       baseUrl: process.env.AI_INTEGRATIONS_GEMINI_BASE_URL,
     },
   });
+  if (gemini) console.log("Gemini client initialized");
 } catch (err) {
   console.warn("Gemini client initialization failed:", err?.message || err);
 }
