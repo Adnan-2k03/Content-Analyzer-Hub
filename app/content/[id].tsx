@@ -9,10 +9,10 @@ import {
   ActivityIndicator,
   Platform,
   KeyboardAvoidingView,
-  FlatList,
+  
 } from "react-native";
 import { router, useLocalSearchParams } from "expo-router";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons, Feather, MaterialCommunityIcons } from "@expo/vector-icons";
 import { Image } from "expo-image";
@@ -44,7 +44,6 @@ function TopicChip({ topic }: { topic: string }) {
 export default function ContentDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const insets = useSafeAreaInsets();
-  const queryClient = useQueryClient();
   const webTopInset = Platform.OS === "web" ? 67 : 0;
 
   const [question, setQuestion] = useState("");
