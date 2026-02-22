@@ -14,18 +14,28 @@ import {
 } from "./utils/video";
 import { batchProcess } from "./replit_integrations/batch";
 
-const openai = new OpenAI({
-  apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
-  baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
-});
+let openai: any = null;
+try {
+  openai = new OpenAI({
+    apiKey: process.env.AI_INTEGRATIONS_OPENAI_API_KEY,
+    baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
+  });
+} catch (err) {
+  console.warn("OpenAI client initialization failed:", err?.message || err);
+}
 
-const gemini = new GoogleGenAI({
-  apiKey: process.env.AI_INTEGRATIONS_GEMINI_API_KEY,
-  httpOptions: {
-    apiVersion: "",
-    baseUrl: process.env.AI_INTEGRATIONS_GEMINI_BASE_URL,
-  },
-});
+let gemini: any = null;
+try {
+  gemini = new GoogleGenAI({
+    apiKey: process.env.AI_INTEGRATIONS_GEMINI_API_KEY,
+    httpOptions: {
+      apiVersion: "",
+      baseUrl: process.env.AI_INTEGRATIONS_GEMINI_BASE_URL,
+    },
+  });
+} catch (err) {
+  console.warn("Gemini client initialization failed:", err?.message || err);
+}
 
 async function analyzeVideoWithGemini(
   videoChunks: { data: string; mimeType: string }[],
