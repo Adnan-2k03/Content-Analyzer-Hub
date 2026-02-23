@@ -1,0 +1,54 @@
+{
+  "contentItems": [
+    {
+      "id": 1,
+      "type": "carousel",
+      "title": "Processing...",
+      "url": null,
+      "analysisMode": null,
+      "summary": "",
+      "transcript": null,
+      "keyTopics": null,
+      "insights": null,
+      "rawCaption": null,
+      "thumbnailData": null,
+      "status": "error",
+      "errorMessage": "401 You didn't provide an API key. You need to provide your API key in an Authorization header using Bearer auth (i.e. Authorization: Bearer YOUR_KEY), or as the password field (with blank username) if you're accessing the API from your browser and are prompted for a username and password. You can obtain an API key from https://platform.openai.com/account/api-keys.",
+      "createdAt": "2026-02-22T21:31:29.567Z"
+    },
+    {
+      "id": 2,
+      "type": "video",
+      "title": "Processing...",
+      "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      "analysisMode": "metadata",
+      "summary": "",
+      "transcript": null,
+      "keyTopics": null,
+      "insights": null,
+      "rawCaption": null,
+      "thumbnailData": null,
+      "status": "error",
+      "errorMessage": "No text-generation provider available (OpenAI or Gemini)",
+      "createdAt": "2026-02-23T00:10:44.688Z"
+    }
+  ],
+  "contentImages": [
+    {
+      "id": 1,
+      "contentId": 1,
+      "imageData": "aGVsbG8=",
+      "orderIndex": 0
+    },
+    {
+      "id": 2,
+      "contentId": 1,
+      "imageData": "d29ybGQ=",
+      "orderIndex": 1
+    }
+  ],
+  "qaMessages": [],
+  "nextContentId": 3,
+  "nextImageId": 3,
+  "nextQaId": 1
+}

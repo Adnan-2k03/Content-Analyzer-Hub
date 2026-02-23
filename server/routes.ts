@@ -3,6 +3,7 @@ import { createServer, type Server } from "node:http";
 import OpenAI from "openai";
 import { GoogleGenAI } from "@google/genai";
 import { db } from "./db";
+import { localdb } from "./localdb";
 import { contentItems, contentImages, qaMessages } from "@shared/schema";
 import { eq, desc } from "drizzle-orm";
 import {
@@ -21,7 +22,7 @@ try {
     baseURL: process.env.AI_INTEGRATIONS_OPENAI_BASE_URL,
   });
   if (openai) console.log("OpenAI client initialized");
-} catch (err) {
+} catch (err: any) {
   console.warn("OpenAI client initialization failed:", err?.message || err);
 }
 
@@ -35,9 +36,28 @@ try {
     },
   });
   if (gemini) console.log("Gemini client initialized");
-} catch (err) {
+} catch (err: any) {
   console.warn("Gemini client initialization failed:", err?.message || err);
 }
+
+async function generateText({ model, messages, maxTokens }: { model: string; messages: any[]; maxTokens?: number; }) {
+  // Prefer OpenAI if available
+  if (openai) {
+    return await openai.chat.completions.create({ model, messages, max_completion_tokens: maxTokens || 8192 });
+  }
+
+  if (!gemini) {
+    throw new Error("No text-generation provider available (OpenAI or Gemini)");
+  }
+
+  // Convert messages array to Gemini parts
+  const parts: any[] = messages.map((m) => ({ type: 'text', text: m.content || m }));
+  const response = await gemini.models.generateContent({ model: "gemini-2.5-flash", contents: [{ role: 'user', parts }], config: { maxOutputTokens: maxTokens || 8192 } });
+  const text = response?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+  return { choices: [{ message: { content: text } }] } as any;
+}
+
+const useLocal = !process.env.DATABASE_URL;
 
 async function analyzeVideoWithGemini(
   videoChunks: { data: string; mimeType: string }[],
@@ -81,9 +101,9 @@ Provide a JSON response with:
   const combinedVisuals = chunkResults.map((r: any) => r.visualDescription || "").filter(Boolean).join("\n\n");
   const allKeyPoints = chunkResults.flatMap((r: any) => r.keyPoints || []);
 
-  const synthesisResponse = await openai.chat.completions.create({
+  const synthesisResponse = await generateText({
     model: "gpt-5.2",
-    max_completion_tokens: 8192,
+    maxTokens: 8192,
     messages: [
       {
         role: "system",
@@ -95,18 +115,9 @@ Provide a JSON response with:
       },
       {
         role: "user",
-        content: `Synthesize this video analysis:
-
-Visual Content: ${combinedVisuals}
-
-Transcript: ${combinedTranscript || "No spoken words detected"}
-
-Key Points: ${JSON.stringify(allKeyPoints)}
-
-${caption ? `Original Caption: ${caption}` : ""}`,
+        content: `Synthesize this video analysis:\n\nVisual Content: ${combinedVisuals}\n\nTranscript: ${combinedTranscript || "No spoken words detected"}\n\nKey Points: ${JSON.stringify(allKeyPoints)}\n\n${caption ? `Original Caption: ${caption}` : ""}`,
       },
     ],
-    response_format: { type: "json_object" },
   });
 
   const raw = synthesisResponse.choices[0]?.message?.content || "{}";
@@ -138,34 +149,21 @@ async function analyzeWithVision(
   if (transcript) textContext.push(`Transcript:\n${transcript}`);
   if (caption) textContext.push(`Caption:\n${caption}`);
 
-  const response = await openai.chat.completions.create({
+  const response = await generateText({
     model: "gpt-5.2",
-    max_completion_tokens: 8192,
+    maxTokens: 8192,
     messages: [
       {
         role: "system",
-        content: `You analyze social media content (videos, reels, carousel posts). Provide structured analysis in JSON format with these fields:
-- "title": A concise descriptive title for this content
-- "summary": A comprehensive 2-4 paragraph summary of what the content is about
-- "keyTopics": An array of 3-8 key topics or themes covered
-- "insights": Detailed insights, takeaways, or notable points from the content
-
-Be thorough and informative. Extract as much useful information as possible.`,
+        content: `You analyze social media content (videos, reels, carousel posts). Provide structured analysis in JSON format with these fields:\n- \"title\": A concise descriptive title for this content\n- \"summary\": A comprehensive 2-4 paragraph summary of what the content is about\n- \"keyTopics\": An array of 3-8 key topics or themes covered\n- \"insights\": Detailed insights, takeaways, or notable points from the content\n\nBe thorough and informative. Extract as much useful information as possible.`,
       },
       {
         role: "user",
-        content: [
-          ...imageMessages,
-          {
-            type: "text",
-            text: textContext.length > 0
-              ? `Analyze this content:\n\n${textContext.join("\n\n")}`
-              : "Analyze this visual content thoroughly.",
-          },
-        ],
+        content: textContext.length > 0
+          ? `Analyze this content:\n\n${textContext.join("\n\n")}`
+          : "Analyze this visual content thoroughly.",
       },
     ],
-    response_format: { type: "json_object" },
   });
 
   const raw = response.choices[0]?.message?.content || "{}";
@@ -194,26 +192,19 @@ async function analyzeTextContent(
     .filter(Boolean)
     .join("\n\n");
 
-  const response = await openai.chat.completions.create({
+  const response = await generateText({
     model: "gpt-5.2",
-    max_completion_tokens: 8192,
+    maxTokens: 8192,
     messages: [
       {
         role: "system",
-        content: `You analyze social media content based on available metadata and transcripts. Provide structured analysis in JSON format with these fields:
-- "title": A concise descriptive title for this content
-- "summary": A comprehensive 2-4 paragraph summary
-- "keyTopics": An array of 3-8 key topics or themes
-- "insights": Detailed insights, takeaways, or notable points
-
-Be thorough and extract as much useful information as possible from the available text.`,
+        content: `You analyze social media content based on available metadata and transcripts. Provide structured analysis in JSON format with these fields:\n- \"title\": A concise descriptive title for this content\n- \"summary\": A comprehensive 2-4 paragraph summary\n- \"keyTopics\": An array of 3-8 key topics or themes\n- \"insights\": Detailed insights, takeaways, or notable points\n\nBe thorough and extract as much useful information as possible from the available text.`,
       },
       {
         role: "user",
         content: `Analyze this content:\n\n${context}`,
       },
     ],
-    response_format: { type: "json_object" },
   });
 
   const raw = response.choices[0]?.message?.content || "{}";
@@ -238,19 +229,32 @@ export async function registerRoutes(app: Express): Promise<Server> {
       return res.status(400).json({ error: "URL is required" });
     }
 
-    const [item] = await db
-      .insert(contentItems)
-      .values({
+    let item: any;
+    if (useLocal) {
+      item = localdb.insertContent({
         type: "video",
         title: "Processing...",
         url,
         analysisMode: mode || "metadata",
         summary: "",
         status: "processing",
-      })
-      .returning();
-
-    res.json(item);
+      });
+      res.json(item);
+    } else {
+      const [dbItem] = await db
+        .insert(contentItems)
+        .values({
+          type: "video",
+          title: "Processing...",
+          url,
+          analysisMode: mode || "metadata",
+          summary: "",
+          status: "processing",
+        })
+        .returning();
+      item = dbItem;
+      res.json(item);
+    }
 
     try {
       if (mode === "multimodal") {
@@ -264,10 +268,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
           }
 
           const analysis = await analyzeVideoWithGemini(chunks, metadata.description || "");
-
-          await db
-            .update(contentItems)
-            .set({
+          if (useLocal) {
+            localdb.updateContent(item.id, {
               title: analysis.title,
               summary: analysis.summary,
               transcript: analysis.transcript || metadata.subtitles || null,
@@ -276,18 +278,30 @@ export async function registerRoutes(app: Express): Promise<Server> {
               rawCaption: metadata.description || null,
               thumbnailData: thumbnailBase64 || null,
               status: "complete",
-            })
-            .where(eq(contentItems.id, item.id));
+            } as any);
+          } else {
+            await db
+              .update(contentItems)
+              .set({
+                title: analysis.title,
+                summary: analysis.summary,
+                transcript: analysis.transcript || metadata.subtitles || null,
+                keyTopics: JSON.stringify(analysis.keyTopics),
+                insights: analysis.insights,
+                rawCaption: metadata.description || null,
+                thumbnailData: thumbnailBase64 || null,
+                status: "complete",
+              })
+              .where(eq(contentItems.id, item.id));
+          }
         } finally {
           await cleanupWorkDir(workDir);
         }
       } else {
         const metadata = await getVideoMetadata(url);
         const analysis = await analyzeTextContent(metadata);
-
-        await db
-          .update(contentItems)
-          .set({
+        if (useLocal) {
+          localdb.updateContent(item.id, {
             title: analysis.title,
             summary: analysis.summary,
             transcript: metadata.subtitles || null,
@@ -295,18 +309,35 @@ export async function registerRoutes(app: Express): Promise<Server> {
             insights: analysis.insights,
             rawCaption: metadata.description || null,
             status: "complete",
-          })
-          .where(eq(contentItems.id, item.id));
+          } as any);
+        } else {
+          await db
+            .update(contentItems)
+            .set({
+              title: analysis.title,
+              summary: analysis.summary,
+              transcript: metadata.subtitles || null,
+              keyTopics: JSON.stringify(analysis.keyTopics),
+              insights: analysis.insights,
+              rawCaption: metadata.description || null,
+              status: "complete",
+            })
+            .where(eq(contentItems.id, item.id));
+        }
       }
     } catch (error: any) {
       console.error("Video analysis failed:", error);
-      await db
-        .update(contentItems)
-        .set({
-          status: "error",
-          errorMessage: error.message || "Analysis failed",
-        })
-        .where(eq(contentItems.id, item.id));
+      if (useLocal) {
+        localdb.updateContent(item.id, { status: "error", errorMessage: error.message || "Analysis failed" } as any);
+      } else {
+        await db
+          .update(contentItems)
+          .set({
+            status: "error",
+            errorMessage: error.message || "Analysis failed",
+          })
+          .where(eq(contentItems.id, item.id));
+      }
     }
   });
 
@@ -317,26 +348,36 @@ export async function registerRoutes(app: Express): Promise<Server> {
       return res.status(400).json({ error: "At least one image is required" });
     }
 
-    const [item] = await db
-      .insert(contentItems)
-      .values({
-        type: "carousel",
-        title: "Processing...",
-        url: url || null,
-        summary: "",
-        status: "processing",
-      })
-      .returning();
+    let item: any;
+    if (useLocal) {
+      item = localdb.insertContent({ type: "carousel", title: "Processing...", url: url || null, summary: "", status: "processing" });
+      for (let i = 0; i < images.length; i++) {
+        localdb.insertImage(item.id, images[i], i);
+      }
+      res.json(item);
+    } else {
+      const [dbItem] = await db
+        .insert(contentItems)
+        .values({
+          type: "carousel",
+          title: "Processing...",
+          url: url || null,
+          summary: "",
+          status: "processing",
+        })
+        .returning();
 
-    for (let i = 0; i < images.length; i++) {
-      await db.insert(contentImages).values({
-        contentId: item.id,
-        imageData: images[i],
-        orderIndex: i,
-      });
+      for (let i = 0; i < images.length; i++) {
+        await db.insert(contentImages).values({
+          contentId: dbItem.id,
+          imageData: images[i],
+          orderIndex: i,
+        });
+      }
+
+      item = dbItem;
+      res.json(item);
     }
-
-    res.json(item);
 
     try {
       let caption = "";
@@ -346,9 +387,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const analysis = await analyzeWithVision(images, "", caption);
 
-      await db
-        .update(contentItems)
-        .set({
+      if (useLocal) {
+        localdb.updateContent(item.id, {
           title: analysis.title,
           summary: analysis.summary,
           keyTopics: JSON.stringify(analysis.keyTopics),
@@ -356,22 +396,44 @@ export async function registerRoutes(app: Express): Promise<Server> {
           rawCaption: caption || null,
           thumbnailData: images[0] || null,
           status: "complete",
-        })
-        .where(eq(contentItems.id, item.id));
+        } as any);
+      } else {
+        await db
+          .update(contentItems)
+          .set({
+            title: analysis.title,
+            summary: analysis.summary,
+            keyTopics: JSON.stringify(analysis.keyTopics),
+            insights: analysis.insights,
+            rawCaption: caption || null,
+            thumbnailData: images[0] || null,
+            status: "complete",
+          })
+          .where(eq(contentItems.id, item.id));
+      }
     } catch (error: any) {
       console.error("Carousel analysis failed:", error);
-      await db
-        .update(contentItems)
-        .set({
-          status: "error",
-          errorMessage: error.message || "Analysis failed",
-        })
-        .where(eq(contentItems.id, item.id));
+      if (useLocal) {
+        localdb.updateContent(item.id, { status: "error", errorMessage: error.message || "Analysis failed" } as any);
+      } else {
+        await db
+          .update(contentItems)
+          .set({
+            status: "error",
+            errorMessage: error.message || "Analysis failed",
+          })
+          .where(eq(contentItems.id, item.id));
+      }
     }
   });
 
   app.get("/api/content", async (_req: Request, res: Response) => {
     try {
+      if (useLocal) {
+        const items = localdb.getAllContent();
+        return res.json(items);
+      }
+
       const items = await db
         .select()
         .from(contentItems)
@@ -379,15 +441,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.json(items);
     } catch (error) {
       console.error("Error fetching content (DB unavailable):", error);
-      // For local preview when no Postgres is configured, return an empty array
-      // so the frontend can still load without a DB connection.
       res.json([]);
     }
   });
 
   app.get("/api/content/:id", async (req: Request, res: Response) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseInt(String(req.params.id));
+      if (useLocal) {
+        const item = localdb.getContentById(id);
+        if (!item) return res.status(404).json({ error: "Content not found" });
+        return res.json(item);
+      }
+
       const [item] = await db
         .select()
         .from(contentItems)
@@ -418,7 +484,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.delete("/api/content/:id", async (req: Request, res: Response) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseInt(String(req.params.id));
+      if (useLocal) {
+        localdb.deleteContent(id);
+        return res.status(204).send();
+      }
+
       await db.delete(qaMessages).where(eq(qaMessages.contentId, id));
       await db.delete(contentImages).where(eq(contentImages.contentId, id));
       await db.delete(contentItems).where(eq(contentItems.id, id));
@@ -431,33 +502,31 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post("/api/content/:id/qa", async (req: Request, res: Response) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseInt(String(req.params.id));
       const { question } = req.body;
 
       if (!question) {
         return res.status(400).json({ error: "Question is required" });
       }
 
-      const [item] = await db
-        .select()
-        .from(contentItems)
-        .where(eq(contentItems.id, id));
-
-      if (!item) {
-        return res.status(404).json({ error: "Content not found" });
+      let item: any;
+      if (useLocal) {
+        item = localdb.getContentById(id);
+        if (!item) return res.status(404).json({ error: "Content not found" });
+        localdb.insertQa(id, "user", question);
+      } else {
+        const [dbItem] = await db
+          .select()
+          .from(contentItems)
+          .where(eq(contentItems.id, id));
+        if (!dbItem) return res.status(404).json({ error: "Content not found" });
+        item = dbItem;
+        await db.insert(qaMessages).values({ contentId: id, role: "user", content: question });
       }
 
-      await db.insert(qaMessages).values({
-        contentId: id,
-        role: "user",
-        content: question,
-      });
-
-      const previousQa = await db
-        .select()
-        .from(qaMessages)
-        .where(eq(qaMessages.contentId, id))
-        .orderBy(qaMessages.createdAt);
+      const previousQa = useLocal
+        ? (localdb.getContentById(id)?.qa || [])
+        : await db.select().from(qaMessages).where(eq(qaMessages.contentId, id)).orderBy(qaMessages.createdAt);
 
       const contextParts = [
         `Content Title: ${item.title}`,
@@ -486,28 +555,30 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.setHeader("Cache-Control", "no-cache");
       res.setHeader("Connection", "keep-alive");
 
-      const stream = await openai.chat.completions.create({
-        model: "gpt-5.2",
-        messages: chatHistory,
-        stream: true,
-        max_completion_tokens: 8192,
-      });
-
       let fullResponse = "";
-
-      for await (const chunk of stream) {
-        const content = chunk.choices[0]?.delta?.content || "";
-        if (content) {
-          fullResponse += content;
-          res.write(`data: ${JSON.stringify({ content })}\n\n`);
+      if (openai) {
+        const stream = await openai.chat.completions.create({ model: "gpt-5.2", messages: chatHistory, stream: true, max_completion_tokens: 8192 });
+        for await (const chunk of stream) {
+          const content = chunk.choices[0]?.delta?.content || "";
+          if (content) {
+            fullResponse += content;
+            res.write(`data: ${JSON.stringify({ content })}\n\n`);
+          }
+        }
+      } else {
+        // Fallback to Gemini (non-streaming)
+        const resp = await generateText({ model: "gpt-5.2", messages: chatHistory, maxTokens: 8192 });
+        fullResponse = resp.choices[0]?.message?.content || "";
+        if (fullResponse) {
+          res.write(`data: ${JSON.stringify({ content: fullResponse })}\n\n`);
         }
       }
 
-      await db.insert(qaMessages).values({
-        contentId: id,
-        role: "assistant",
-        content: fullResponse,
-      });
+      if (useLocal) {
+        localdb.insertQa(id, "assistant", fullResponse);
+      } else {
+        await db.insert(qaMessages).values({ contentId: id, role: "assistant", content: fullResponse });
+      }
 
       res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
       res.end();

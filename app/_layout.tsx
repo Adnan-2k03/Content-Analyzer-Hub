@@ -2,6 +2,7 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { Stack } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import React, { useEffect } from "react";
+import { Alert, Platform } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { KeyboardProvider } from "react-native-keyboard-controller";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
@@ -41,6 +42,32 @@ export default function RootLayout() {
       SplashScreen.hideAsync();
     }
   }, [fontsLoaded]);
+
+  useEffect(() => {
+    if (Platform.OS === "web" && typeof window !== "undefined") {
+      const onUnhandled = (ev: PromiseRejectionEvent) => {
+        // Log and show a friendly alert for unhandled rejections in web preview
+        // eslint-disable-next-line no-console
+        console.error("Unhandled promise rejection:", ev.reason);
+        try {
+          Alert.alert?.("Error", String(ev.reason?.message || ev.reason || "Unknown error"));
+        } catch {}
+      };
+
+      const onError = (event: ErrorEvent) => {
+        // eslint-disable-next-line no-console
+        console.error("Unhandled error:", event.error || event.message);
+      };
+
+      window.addEventListener("unhandledrejection", onUnhandled as any);
+      window.addEventListener("error", onError as any);
+
+      return () => {
+        window.removeEventListener("unhandledrejection", onUnhandled as any);
+        window.removeEventListener("error", onError as any);
+      };
+    }
+  }, []);
 
   if (!fontsLoaded) return null;
 

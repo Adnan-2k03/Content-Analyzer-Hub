@@ -56,7 +56,10 @@ export default function AddContentScreen() {
       router.back();
     },
     onError: (error: Error) => {
-      Alert.alert("Error", error.message);
+      // Log error and show alert - also keep a console trace for web
+      // eslint-disable-next-line no-console
+      console.error("Analyze mutation error:", error);
+      Alert.alert("Error", error.message || String(error));
     },
   });
 
